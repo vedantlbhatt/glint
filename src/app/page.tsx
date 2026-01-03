@@ -1,10 +1,37 @@
 'use client';
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Send, Loader2, Terminal, Sparkles } from 'lucide-react';
+import { Send, Loader2, Sparkles, Eye, Code, User } from 'lucide-react';
 
-function ShaderScene() {
+const DEFAULT_FRAGMENT_SHADER = `
+  uniform float uTime;
+  uniform vec2 uResolution;
+  varying vec2 vUv;
+  void main() {
+    vec2 uv = (vUv - 0.5) * 2.0;
+    float wave = sin(uv.x * 10.0 + uTime * 5.0) * 0.5 + 0.5;
+    vec3 col = 0.5 + 0.5 * cos(uTime + vec3(0, 1, 2) + wave * 3.0);
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+const VERTEX_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  shaderCode?: string;
+}
+
+function ShaderScene({ fragmentShader }: { fragmentShader: string }) {
   const meshRef = useRef<THREE.Mesh>(null!);
   const matRef = useRef<THREE.ShaderMaterial>(null!);
   const { size } = useThree();
@@ -20,29 +47,14 @@ function ShaderScene() {
     <mesh ref={meshRef}>
       <planeGeometry args={[4, 4]} />
       <shaderMaterial
+        key={fragmentShader}
         ref={matRef}
         uniforms={{
           uTime: { value: 0 },
           uResolution: { value: new THREE.Vector2(1, 1) },
         }}
-        vertexShader={`
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `}
-        fragmentShader={`
-          uniform float uTime;
-          uniform vec2 uResolution;
-          varying vec2 vUv;
-          void main() {
-            vec2 uv = (vUv - 0.5) * 2.0;
-            float wave = sin(uv.x * 10.0 + uTime * 5.0) * 0.5 + 0.5;
-            vec3 col = 0.5 + 0.5 * cos(uTime + vec3(0, 1, 2) + wave * 3.0);
-            gl_FragColor = vec4(col, 1.0);
-          }
-        `}
+        vertexShader={VERTEX_SHADER}
+        fragmentShader={fragmentShader}
       />
     </mesh>
   );
@@ -58,25 +70,156 @@ function LoadingDots() {
   );
 }
 
+function ViewToggle({ view, setView }: { view: 'visual' | 'code'; setView: (v: 'visual' | 'code') => void }) {
+  return (
+    <div className="inline-flex bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-0.5">
+      <button
+        onClick={() => setView('visual')}
+        className={`flex items-center justify-center w-8 h-7 rounded-md transition-all ${
+          view === 'visual'
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+        }`}
+        title="Visual output"
+      >
+        <Eye className="w-4 h-4" />
+      </button>
+      <button
+        onClick={() => setView('code')}
+        className={`flex items-center justify-center w-8 h-7 rounded-md transition-all ${
+          view === 'code'
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+        }`}
+        title="View code"
+      >
+        <Code className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
+function ChatMessage({ message }: { message: Message }) {
+  const isUser = message.role === 'user';
+  
+  return (
+    <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
+      <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${
+        isUser 
+          ? 'bg-[var(--bg-tertiary)] border border-[var(--border-color)]' 
+          : 'bg-[var(--text-secondary)]'
+      }`}>
+        {isUser ? (
+          <User className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+        ) : (
+          <Sparkles className="w-3.5 h-3.5 text-[var(--bg-primary)]" />
+        )}
+      </div>
+      <div className={`flex-1 ${isUser ? 'text-right' : ''}`}>
+        <div className={`inline-block max-w-[85%] px-3 py-2 rounded-lg text-sm ${
+          isUser 
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]' 
+            : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border-color)]'
+        }`}>
+          <p className="whitespace-pre-wrap">{message.content}</p>
+          {message.shaderCode && (
+            <div className="mt-2 pt-2 border-t border-[var(--border-color)]">
+              <span className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">
+                shader generated ✓
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState('');
-  const [response, setResponse] = useState('');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [shaderCode, setShaderCode] = useState(DEFAULT_FRAGMENT_SHADER);
+  const [displayedShader, setDisplayedShader] = useState(DEFAULT_FRAGMENT_SHADER);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [splitPosition, setSplitPosition] = useState(50);
+  const [isDragging, setIsDragging] = useState(false);
+  const [view, setView] = useState<'visual' | 'code'>('visual');
+  const containerRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const scrollToBottom = () => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isLoading]);
+
+  const handleMouseDown = useCallback(() => {
+    setIsDragging(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isDragging || !containerRef.current) return;
+    
+    const container = containerRef.current;
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = (x / rect.width) * 100;
+    
+    setSplitPosition(Math.min(80, Math.max(20, percentage)));
+  }, [isDragging]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+  }, []);
+
+  const extractShaderCode = (response: string): string | null => {
+    const codeBlockRegex = /```(?:glsl|frag|fragment)?\s*([\s\S]*?)```/i;
+    const match = response.match(codeBlockRegex);
+    
+    if (match) {
+      return match[1].trim();
+    }
+    
+    if (response.includes('void main()') && response.includes('gl_FragColor')) {
+      return response.trim();
+    }
+    
+    return null;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || isLoading) return;
 
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: prompt,
+    };
+    
+    setMessages(prev => [...prev, userMessage]);
+    setPrompt('');
     setIsLoading(true);
     setError('');
-    setResponse('');
 
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ 
+          prompt: `Generate a GLSL fragment shader based on this description: "${prompt}"
+
+Requirements:
+- Use these exact uniforms: uniform float uTime; uniform vec2 uResolution; varying vec2 vUv;
+- The shader should be animated using uTime
+- Output to gl_FragColor
+- Return ONLY the fragment shader code in a code block, no explanations
+- Make it visually interesting and creative` 
+        }),
       });
 
       const data = await res.json();
@@ -85,8 +228,29 @@ export default function Home() {
         throw new Error(data.error || 'Something went wrong');
       }
 
-      setResponse(data.response);
+      const extractedCode = extractShaderCode(data.response);
+      
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: extractedCode ? 'Here\'s your shader — check the output panel!' : 'I couldn\'t generate a valid shader. Try a different description.',
+        shaderCode: extractedCode || undefined,
+      };
+      
+      setMessages(prev => [...prev, assistantMessage]);
+      
+      if (extractedCode) {
+        setShaderCode(extractedCode);
+        setDisplayedShader(extractedCode);
+        setView('visual');
+      }
     } catch (err) {
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to get response'}`,
+      };
+      setMessages(prev => [...prev, errorMessage]);
       setError(err instanceof Error ? err.message : 'Failed to get response');
     } finally {
       setIsLoading(false);
@@ -100,127 +264,185 @@ export default function Home() {
     }
   };
 
+  // Auto-resize textarea
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setPrompt(e.target.value);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 150) + 'px';
+    }
+  };
+
   return (
-    <main className="min-h-screen bg-[var(--bg-primary)] relative">
+    <main 
+      className="h-screen bg-[var(--bg-primary)] flex flex-col overflow-hidden select-none"
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+    >
       <div className="noise-overlay" />
       
       {/* Header */}
-      <header className="border-b border-[var(--border-color)] px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 border border-[var(--border-accent)] flex items-center justify-center">
-              <Sparkles className="w-4 h-4 text-[var(--text-secondary)]" />
+      <header className="border-b border-[var(--border-color)] px-4 py-2 flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 border border-[var(--border-accent)] flex items-center justify-center">
+              <Sparkles className="w-3 h-3 text-[var(--text-secondary)]" />
             </div>
-            <span className="text-sm font-medium tracking-wider uppercase text-[var(--text-secondary)]">
+            <span className="text-xs font-medium tracking-wider uppercase text-[var(--text-secondary)]">
               glint
             </span>
           </div>
           <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs">
-            <span className="w-2 h-2 bg-[var(--text-secondary)] rounded-full" />
+            <span className="w-1.5 h-1.5 bg-[var(--text-secondary)] rounded-full" />
             <span>claude connected</span>
           </div>
         </div>
       </header>
 
-      {/* Main content */}
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          
-          {/* Left: Shader display */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs uppercase tracking-wider">
-              <Terminal className="w-3 h-3" />
-              <span>shader output</span>
-            </div>
-            <div className="shader-frame aspect-square w-full max-w-[500px] overflow-hidden">
-              <Canvas camera={{ position: [0, 0, 5] }}>
-                <color attach="background" args={['#0c0c0c']} />
-                <ShaderScene />
-              </Canvas>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs font-mono">
-              <span className="text-[var(--text-secondary)]">status:</span> rendering @ 60fps
-            </div>
-          </div>
-
-          {/* Right: Prompt & Response */}
-          <div className="space-y-6">
-            {/* Prompt input */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs uppercase tracking-wider">
-                <span className="cursor-blink">▌</span>
-                <span>prompt</span>
+      {/* Main split view */}
+      <div 
+        ref={containerRef}
+        className="flex-1 flex relative min-h-0"
+        style={{ cursor: isDragging ? 'col-resize' : 'default' }}
+      >
+        {/* Left: Chat */}
+        <div 
+          className="h-full overflow-hidden flex flex-col border-r border-[var(--border-color)]"
+          style={{ width: `${splitPosition}%` }}
+        >
+          {/* Chat messages */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+            {messages.length === 0 && (
+              <div className="h-full flex flex-col items-center justify-center text-center px-4">
+                <div className="w-12 h-12 border border-[var(--border-accent)] rounded-lg flex items-center justify-center mb-4">
+                  <Sparkles className="w-6 h-6 text-[var(--text-muted)]" />
+                </div>
+                <p className="text-[var(--text-secondary)] text-sm mb-1">describe a shader</p>
+                <p className="text-[var(--text-muted)] text-xs">
+                  try "a swirling galaxy" or "ocean waves"
+                </p>
               </div>
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="relative">
-                  <textarea
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="describe what you want..."
-                    className="prompt-input w-full h-32 px-4 py-3 text-sm resize-none font-mono"
-                    disabled={isLoading}
-                  />
-                  <div className="absolute bottom-3 right-3 text-[var(--text-muted)] text-xs">
-                    shift+enter for newline
+            )}
+            
+            {messages.map((message) => (
+              <ChatMessage key={message.id} message={message} />
+            ))}
+            
+            {isLoading && (
+              <div className="flex gap-3">
+                <div className="w-7 h-7 rounded-md bg-[var(--text-secondary)] flex items-center justify-center flex-shrink-0">
+                  <Sparkles className="w-3.5 h-3.5 text-[var(--bg-primary)]" />
+                </div>
+                <div className="flex-1">
+                  <div className="inline-block px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-color)]">
+                    <div className="flex items-center gap-2 text-[var(--text-secondary)] text-sm">
+                      <span>generating shader</span>
+                      <LoadingDots />
+                    </div>
                   </div>
                 </div>
+              </div>
+            )}
+            
+            <div ref={chatEndRef} />
+          </div>
+          
+          {/* Input area */}
+          <div className="flex-shrink-0 p-3 border-t border-[var(--border-color)]">
+            <form onSubmit={handleSubmit} className="relative">
+              <div className="relative bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg focus-within:border-[var(--border-accent)] transition-colors">
+                <textarea
+                  ref={textareaRef}
+                  value={prompt}
+                  onChange={handleTextareaChange}
+                  onKeyDown={handleKeyDown}
+                  placeholder="describe your shader..."
+                  rows={1}
+                  className="w-full bg-transparent px-4 py-3 pr-12 text-sm resize-none font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none max-h-[150px]"
+                  disabled={isLoading}
+                />
                 <button
                   type="submit"
                   disabled={isLoading || !prompt.trim()}
-                  className="btn-primary px-6 py-2.5 text-sm flex items-center gap-2 font-mono"
+                  className="absolute right-2 bottom-2 w-8 h-8 flex items-center justify-center rounded-md bg-[var(--text-primary)] text-[var(--bg-primary)] disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[var(--accent)] transition-colors"
                 >
                   {isLoading ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      processing
-                    </>
+                    <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
-                    <>
-                      <Send className="w-4 h-4" />
-                      send
-                    </>
+                    <Send className="w-4 h-4" />
                   )}
                 </button>
-              </form>
-            </div>
+              </div>
+              <div className="flex items-center justify-between mt-2 px-1">
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  enter to send · shift+enter for newline
+                </span>
+              </div>
+            </form>
+          </div>
+        </div>
 
-            {/* Response area */}
-            <div className="space-y-4">
+        {/* Draggable divider */}
+        <div
+          className="absolute top-0 bottom-0 w-2 -ml-1 cursor-col-resize z-10 group"
+          style={{ left: `${splitPosition}%` }}
+          onMouseDown={handleMouseDown}
+        >
+          <div className={`absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] transition-colors ${
+            isDragging 
+              ? 'bg-[var(--text-secondary)]' 
+              : 'bg-transparent group-hover:bg-[var(--border-accent)]'
+          }`} />
+        </div>
+
+        {/* Right: Shader output */}
+        <div 
+          className="h-full overflow-hidden flex flex-col"
+          style={{ width: `${100 - splitPosition}%` }}
+        >
+          <div className="flex-1 flex flex-col p-3 min-h-0">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-2 flex-shrink-0">
               <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs uppercase tracking-wider">
-                <span>response</span>
-              </div>
-              <div className="response-container min-h-[200px] max-h-[400px] overflow-y-auto p-4">
-                {isLoading && (
-                  <div className="flex items-center gap-2 text-[var(--text-secondary)] text-sm">
-                    <span>thinking</span>
-                    <LoadingDots />
-                  </div>
-                )}
-                {error && (
-                  <div className="text-[#ff6b6b] text-sm font-mono">
-                    error: {error}
-                  </div>
-                )}
-                {response && !isLoading && (
-                  <div className="text-sm text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
-                    {response}
-                  </div>
-                )}
-                {!response && !isLoading && !error && (
-                  <div className="text-[var(--text-muted)] text-sm font-mono">
-                    awaiting input_
-                  </div>
+                <span>output</span>
+                {view === 'code' && (
+                  <span className="text-[var(--text-muted)]">
+                    · {shaderCode.split('\n').length} lines
+                  </span>
                 )}
               </div>
+              <ViewToggle view={view} setView={setView} />
+            </div>
+            
+            {/* Main content area */}
+            <div className="shader-frame flex-1 overflow-hidden relative min-h-0">
+              {view === 'visual' ? (
+                <Canvas camera={{ position: [0, 0, 5] }} className="!absolute inset-0">
+                  <color attach="background" args={['#0c0c0c']} />
+                  <ShaderScene fragmentShader={displayedShader} />
+                </Canvas>
+              ) : (
+                <div className="absolute inset-0 overflow-auto bg-[var(--bg-secondary)] p-3">
+                  <pre className="text-xs font-mono text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
+                    <code>{shaderCode}</code>
+                  </pre>
+                </div>
+              )}
+            </div>
+            
+            {/* Bottom bar */}
+            <div className="text-[var(--text-muted)] text-[10px] font-mono mt-2 flex-shrink-0">
+              <span className="text-[var(--text-secondary)]">status:</span>{' '}
+              {view === 'visual' ? 'rendering @ 60fps' : 'viewing source'}
             </div>
           </div>
         </div>
       </div>
 
       {/* Footer */}
-      <footer className="fixed bottom-0 left-0 right-0 border-t border-[var(--border-color)] px-6 py-3 bg-[var(--bg-primary)]">
-        <div className="max-w-7xl mx-auto flex items-center justify-between text-xs text-[var(--text-muted)] font-mono">
+      <footer className="border-t border-[var(--border-color)] px-4 py-1.5 flex-shrink-0">
+        <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)] font-mono">
           <span>glint v0.1.0</span>
           <span>powered by claude</span>
         </div>
