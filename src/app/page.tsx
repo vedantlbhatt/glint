@@ -1,8 +1,9 @@
 'use client';
-import React, { useRef, useState, useCallback, useEffect } from 'react';
+import React, { useRef, useState, useCallback, useEffect, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls, useGLTF, Environment, Center } from '@react-three/drei';
 import * as THREE from 'three';
-import { Send, Loader2, Sparkles, Eye, Code, User } from 'lucide-react';
+import { Send, Loader2, Sparkles, Eye, Code, User, Box, Zap, Upload } from 'lucide-react';
 
 const DEFAULT_FRAGMENT_SHADER = `
   uniform float uTime;
@@ -60,6 +61,43 @@ function ShaderScene({ fragmentShader }: { fragmentShader: string }) {
   );
 }
 
+function Model({ url }: { url: string }) {
+  const { scene } = useGLTF(url);
+  const modelRef = useRef<THREE.Group>(null!);
+  
+  useFrame((state) => {
+    if (modelRef.current) {
+      modelRef.current.rotation.y = state.clock.elapsedTime * 0.3;
+    }
+  });
+
+  return (
+    <Center>
+      <primitive ref={modelRef} object={scene} scale={1} />
+    </Center>
+  );
+}
+
+function ModelScene({ modelUrl }: { modelUrl: string }) {
+  return (
+    <>
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[10, 10, 5]} intensity={1} />
+      <directionalLight position={[-10, -10, -5]} intensity={0.5} />
+      <Suspense fallback={null}>
+        <Model url={modelUrl} />
+        <Environment preset="city" />
+      </Suspense>
+      <OrbitControls 
+        enablePan={true}
+        enableZoom={true}
+        enableRotate={true}
+        autoRotate={false}
+      />
+    </>
+  );
+}
+
 function LoadingDots() {
   return (
     <span className="inline-flex gap-1">
@@ -67,6 +105,35 @@ function LoadingDots() {
       <span className="loading-dot w-1.5 h-1.5 bg-[var(--text-secondary)] rounded-full" />
       <span className="loading-dot w-1.5 h-1.5 bg-[var(--text-secondary)] rounded-full" />
     </span>
+  );
+}
+
+function ModeToggle({ mode, setMode }: { mode: 'shader' | 'model'; setMode: (m: 'shader' | 'model') => void }) {
+  return (
+    <div className="inline-flex bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-0.5">
+      <button
+        onClick={() => setMode('shader')}
+        className={`flex items-center justify-center w-8 h-7 rounded-md transition-all ${
+          mode === 'shader'
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+        }`}
+        title="Shader mode"
+      >
+        <Zap className="w-4 h-4" />
+      </button>
+      <button
+        onClick={() => setMode('model')}
+        className={`flex items-center justify-center w-8 h-7 rounded-md transition-all ${
+          mode === 'model'
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+        }`}
+        title="3D Model mode"
+      >
+        <Box className="w-4 h-4" />
+      </button>
+    </div>
   );
 }
 
@@ -145,9 +212,13 @@ export default function Home() {
   const [splitPosition, setSplitPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<'visual' | 'code'>('visual');
+  const [mode, setMode] = useState<'shader' | 'model'>('model');
+  const [modelUrl, setModelUrl] = useState<string | null>('/orange-robot.glb');
+  const [modelName, setModelName] = useState<string>('orange-robot.glb');
   const containerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -189,6 +260,23 @@ export default function Home() {
     }
     
     return null;
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    if (!file.name.endsWith('.glb') && !file.name.endsWith('.gltf')) {
+      setError('Please upload a .glb or .gltf file');
+      return;
+    }
+    
+    const url = URL.createObjectURL(file);
+    setModelUrl(url);
+    setModelName(file.name);
+    setMode('model');
+    setView('visual');
+    setError('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -242,6 +330,7 @@ Requirements:
       if (extractedCode) {
         setShaderCode(extractedCode);
         setDisplayedShader(extractedCode);
+        setMode('shader');
         setView('visual');
       }
     } catch (err) {
@@ -264,7 +353,6 @@ Requirements:
     }
   };
 
-  // Auto-resize textarea
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setPrompt(e.target.value);
     if (textareaRef.current) {
@@ -396,7 +484,7 @@ Requirements:
           }`} />
         </div>
 
-        {/* Right: Shader output */}
+        {/* Right: Output */}
         <div 
           className="h-full overflow-hidden flex flex-col"
           style={{ width: `${100 - splitPosition}%` }}
@@ -404,37 +492,84 @@ Requirements:
           <div className="flex-1 flex flex-col p-3 min-h-0">
             {/* Header row */}
             <div className="flex items-center justify-between mb-2 flex-shrink-0">
-              <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs uppercase tracking-wider">
-                <span>output</span>
-                {view === 'code' && (
-                  <span className="text-[var(--text-muted)]">
-                    · {shaderCode.split('\n').length} lines
-                  </span>
-                )}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs uppercase tracking-wider">
+                  <span>output</span>
+                </div>
+                <ModeToggle mode={mode} setMode={setMode} />
               </div>
-              <ViewToggle view={view} setView={setView} />
+              <div className="flex items-center gap-2">
+                {mode === 'model' && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".glb,.gltf"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-accent)] transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      upload .glb
+                    </button>
+                  </>
+                )}
+                {mode === 'shader' && <ViewToggle view={view} setView={setView} />}
+              </div>
             </div>
             
             {/* Main content area */}
             <div className="shader-frame flex-1 overflow-hidden relative min-h-0">
-              {view === 'visual' ? (
-                <Canvas camera={{ position: [0, 0, 5] }} className="!absolute inset-0">
-                  <color attach="background" args={['#0c0c0c']} />
-                  <ShaderScene fragmentShader={displayedShader} />
-                </Canvas>
+              {mode === 'shader' ? (
+                view === 'visual' ? (
+                  <Canvas camera={{ position: [0, 0, 5] }} className="!absolute inset-0">
+                    <color attach="background" args={['#0c0c0c']} />
+                    <ShaderScene fragmentShader={displayedShader} />
+                  </Canvas>
+                ) : (
+                  <div className="absolute inset-0 overflow-auto bg-[var(--bg-secondary)] p-3">
+                    <pre className="text-xs font-mono text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
+                      <code>{shaderCode}</code>
+                    </pre>
+                  </div>
+                )
               ) : (
-                <div className="absolute inset-0 overflow-auto bg-[var(--bg-secondary)] p-3">
-                  <pre className="text-xs font-mono text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
-                    <code>{shaderCode}</code>
-                  </pre>
-                </div>
+                modelUrl ? (
+                  <Canvas camera={{ position: [0, 0, 5], fov: 50 }} className="!absolute inset-0">
+                    <color attach="background" args={['#0c0c0c']} />
+                    <ModelScene modelUrl={modelUrl} />
+        </Canvas>
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <div 
+                      className="w-24 h-24 border-2 border-dashed border-[var(--border-color)] rounded-lg flex flex-col items-center justify-center mb-4 cursor-pointer hover:border-[var(--border-accent)] transition-colors"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Box className="w-8 h-8 text-[var(--text-muted)] mb-2" />
+                      <Upload className="w-4 h-4 text-[var(--text-muted)]" />
+                    </div>
+                    <p className="text-[var(--text-secondary)] text-sm mb-1">drop a .glb file</p>
+                    <p className="text-[var(--text-muted)] text-xs">or click to browse</p>
+                  </div>
+                )
               )}
             </div>
             
             {/* Bottom bar */}
-            <div className="text-[var(--text-muted)] text-[10px] font-mono mt-2 flex-shrink-0">
-              <span className="text-[var(--text-secondary)]">status:</span>{' '}
-              {view === 'visual' ? 'rendering @ 60fps' : 'viewing source'}
+            <div className="text-[var(--text-muted)] text-[10px] font-mono mt-2 flex-shrink-0 flex items-center justify-between">
+              <span>
+                <span className="text-[var(--text-secondary)]">status:</span>{' '}
+                {mode === 'shader' 
+                  ? (view === 'visual' ? 'rendering @ 60fps' : 'viewing source')
+                  : (modelUrl ? `loaded: ${modelName}` : 'no model loaded')
+                }
+              </span>
+              {mode === 'shader' && view === 'code' && (
+                <span>{shaderCode.split('\n').length} lines</span>
+              )}
             </div>
           </div>
         </div>
