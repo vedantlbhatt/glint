@@ -63,37 +63,90 @@ function ShaderScene({ fragmentShader }: { fragmentShader: string }) {
 
 function Model({ url }: { url: string }) {
   const { scene } = useGLTF(url);
-  const modelRef = useRef<THREE.Group>(null!);
+  const groupRef = useRef<THREE.Group>(null!);
+  const bonesMap = useRef<{ [key: string]: THREE.Bone }>({});
+  
+  // Find bones on mount
+  useEffect(() => {
+    const bones: { [key: string]: THREE.Bone } = {};
+    
+    scene.traverse((child) => {
+      if ((child as THREE.Bone).isBone) {
+        bones[child.name] = child as THREE.Bone;
+      }
+    });
+    
+    bonesMap.current = bones;
+    console.log('Bones ready:', Object.keys(bones).join(', '));
+  }, [scene]);
   
   useFrame((state) => {
-    if (modelRef.current) {
-      modelRef.current.rotation.y = state.clock.elapsedTime * 0.3;
+    const time = state.clock.elapsedTime;
+    const bones = bonesMap.current;
+    const walkSpeed = 3;
+    const legSwing = 0.3;
+    const armSwing = 0.3;
+    
+    // Rotate whole model slowly
+    if (groupRef.current) {
+      groupRef.current.rotation.y = time * 0.3;
+    }
+    
+    // Walk animation - X axis, negated for correct direction
+    // Left leg swings forward/back
+    if (bones['L_Thigh']) {
+      bones['L_Thigh'].rotation.x = Math.sin(time * walkSpeed) * legSwing + 3;
+      console.log('L_Thigh rotation:', bones['L_Thigh'].rotation.x);
+    }
+    if (bones['L_Calf']) {
+      bones['L_Calf'].rotation.x = Math.max(0, -Math.sin(time * walkSpeed)) * legSwing * 0.5;
+    }
+    
+    // Right leg (opposite phase)
+    if (bones['R_Thigh']) {
+      bones['R_Thigh'].rotation.x = Math.sin(time * walkSpeed + Math.PI) * legSwing + 3.5;
+    }
+    if (bones['R_Calf']) {
+      bones['R_Calf'].rotation.x = Math.max(0, -Math.sin(time * walkSpeed + Math.PI)) * legSwing * 0.5;
+    }
+    
+    // Arms swing opposite to legs
+    if (bones['L_Upperarm']) {
+      bones['L_Upperarm'].rotation.y = Math.sin(time * walkSpeed + 2 * Math.PI) * armSwing;
+    }
+    if (bones['R_Upperarm']) {
+      bones['R_Upperarm'].rotation.y = Math.sin(time * walkSpeed) * armSwing;
     }
   });
 
   return (
-    <Center>
-      <primitive ref={modelRef} object={scene} scale={1} />
-    </Center>
+    <group ref={groupRef}>
+      <primitive object={scene} scale={1} position={[0, -1, 0]} />
+    </group>
   );
 }
 
 function ModelScene({ modelUrl }: { modelUrl: string }) {
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <directionalLight position={[10, 10, 5]} intensity={1} />
-      <directionalLight position={[-10, -10, -5]} intensity={0.5} />
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[5, 10, 5]} intensity={1.5} />
+      <directionalLight position={[-5, 5, -5]} intensity={0.5} />
       <Suspense fallback={null}>
         <Model url={modelUrl} />
-        <Environment preset="city" />
+        <Environment preset="studio" />
       </Suspense>
       <OrbitControls 
         enablePan={true}
         enableZoom={true}
         enableRotate={true}
-        autoRotate={false}
+        target={[0, 0, 0]}
       />
+      {/* Ground plane for reference */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -1, 0]}>
+        <planeGeometry args={[10, 10]} />
+        <meshStandardMaterial color="#1a1a1a" />
+      </mesh>
     </>
   );
 }
@@ -213,8 +266,8 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<'visual' | 'code'>('visual');
   const [mode, setMode] = useState<'shader' | 'model'>('model');
-  const [modelUrl, setModelUrl] = useState<string | null>('/orange-robot.glb');
-  const [modelName, setModelName] = useState<string>('orange-robot.glb');
+  const [modelUrl, setModelUrl] = useState<string | null>('/robot.glb');
+  const [modelName, setModelName] = useState<string>('robot.glb');
   const containerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
